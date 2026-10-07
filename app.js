@@ -1,6 +1,9 @@
 const API_BASE = 'https://intervals.icu/api/v1';
 const STORAGE_KEY = 'stride.intervals.credentials.v1';
 const LOCAL_WORKOUTS_KEY = 'stride.local-workouts.v1';
+const ACTIVITY_STREAM_CACHE_PREFIX = 'stride.activity-streams.v1:';
+const ACTIVITY_STREAM_CACHE_TTL = 24 * 60 * 60 * 1000;
+const ACTIVITY_STREAM_CACHE_LIMIT = 8;
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const monthTitle = document.querySelector('#month-title');
 const weeksRoot = document.querySelector('#calendar-weeks');
@@ -38,6 +41,223 @@ const POWER_ZONES = [
 
 function powerZone(power) {
   return POWER_ZONES.find(zone => power <= zone.max) || POWER_ZONES[POWER_ZONES.length - 1];
+}
+
+const ZWIFT_ZONE_COLORS = ['#a7a7a7', '#36a9e1', '#35b86b', '#f4d330', '#f18b2b', '#ef3e36', '#a746bd'];
+const ACTIVITY_POWER_ZONE_COLORS = [...ZWIFT_ZONE_COLORS.slice(0, 6), '#8f1f1f'];
+
+function decodeSkylineChart(encoded) {
+  if (typeof encoded !== 'string' || !encoded) return null;
+  try {
+    const binary = atob(encoded);
+    const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+    const fields = new Map();
+    let cursor = 0;
+    const readVarint = () => {
+      let value = 0;
+      let shift = 0;
+      while (cursor < bytes.length && shift < 35) {
+        const byte = bytes[cursor++];
+        value |= (byte & 0x7f) << shift;
+        if (!(byte & 0x80)) return value >>> 0;
+        shift += 7;
+      }
+      throw new Error('Invalid skyline varint');
+    };
+    while (cursor < bytes.length) {
+      const tag = readVarint();
+      const field = tag >>> 3;
+      const wire = tag & 7;
+      if (wire === 0) {
+        const value = readVarint();
+        if (field === 1 || field === 5) fields.set(field, value);
+      } else if (wire === 2) {
+        const length = readVarint();
+        const end = cursor + length;
+        if (end > bytes.length) throw new Error('Invalid skyline length');
+        if ([2, 3, 4].includes(field)) {
+          const values = [];
+          while (cursor < end) values.push(readVarint());
+          if (cursor !== end) throw new Error('Invalid packed skyline field');
+          fields.set(field, values);
+        } else cursor = end;
+      } else if (wire === 1) cursor += 8;
+      else if (wire === 5) cursor += 4;
+      else throw new Error('Unsupported skyline wire type');
+      if (cursor > bytes.length) throw new Error('Invalid skyline data');
+    }
+    const widths = fields.get(2);
+    const intensities = fields.get(3);
+    const zones = fields.get(4);
+    if (!widths?.length || !intensities?.length || !zones?.length) return null;
+    const count = Math.min(widths.length, intensities.length, zones.length);
+    return { type: fields.get(5), widths: widths.slice(0, count), intensities: intensities.slice(0, count), zones: zones.slice(0, count) };
+  } catch {
+    return null;
+  }
+}
+
+function skylineMarkup(event, size = 'small') {
+  const chart = decodeSkylineChart(event.skyline_chart_bytes);
+  if (!chart) return '';
+  const totalWidth = chart.widths.reduce((sum, width) => sum + width, 0) || chart.widths.length;
+  let x = 0;
+  const bars = chart.widths.map((width, index) => {
+    const segmentWidth = (width / totalWidth) * 100;
+    const height = Math.max(2, Math.min(100, chart.intensities[index]));
+    const zone = Math.max(1, Math.min(7, chart.zones[index]));
+    const rect = `<rect x="${x.toFixed(3)}" y="${(100 - height).toFixed(3)}" width="${segmentWidth.toFixed(3)}" height="${height.toFixed(3)}" fill="${ZWIFT_ZONE_COLORS[zone - 1]}"/>`;
+    x += segmentWidth;
+    return rect;
+  }).join('');
+  return `<svg class="activity-skyline activity-skyline-${size}" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Activity intensity skyline colored by power zone">${bars}</svg>`;
+}
+
+function streamMap(payload) {
+  const streams = Array.isArray(payload) ? payload : Array.isArray(payload?.streams) ? payload.streams : [];
+  return Object.fromEntries(streams.filter(stream => stream?.type && Array.isArray(stream.data)).map(stream => [stream.type, stream.data]));
+}
+
+function readActivityStreamCache(activityId) {
+  const key = `${ACTIVITY_STREAM_CACHE_PREFIX}${activityId}`;
+  try {
+    const saved = localStorage.getItem(key);
+    if (!saved) return null;
+    const entry = JSON.parse(saved);
+    if (!entry?.savedAt || Date.now() - entry.savedAt > ACTIVITY_STREAM_CACHE_TTL || !entry.streams) {
+      localStorage.removeItem(key);
+      return null;
+    }
+    return entry.streams;
+  } catch {
+    return null;
+  }
+}
+
+function writeActivityStreamCache(activityId, streams) {
+  const key = `${ACTIVITY_STREAM_CACHE_PREFIX}${activityId}`;
+  try {
+    localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), streams }));
+    const entries = [];
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const storedKey = localStorage.key(index);
+      if (!storedKey?.startsWith(ACTIVITY_STREAM_CACHE_PREFIX)) continue;
+      try {
+        entries.push({ key: storedKey, savedAt: JSON.parse(localStorage.getItem(storedKey) || '{}').savedAt || 0 });
+      } catch {
+        localStorage.removeItem(storedKey);
+      }
+    }
+    entries.sort((a, b) => b.savedAt - a.savedAt);
+    entries.slice(ACTIVITY_STREAM_CACHE_LIMIT).forEach(entry => localStorage.removeItem(entry.key));
+  } catch {
+    // Storage may be unavailable or full; the stream view still works for this opening.
+  }
+}
+
+function activityAnalysisMarkup(streams, activity) {
+  const time = streams.time || [];
+  const watts = streams.watts || [];
+  const heartrate = streams.heartrate || [];
+  const cadence = streams.cadence || [];
+  const length = Math.min(time.length, watts.length, heartrate.length || Infinity);
+  if (!length) return '<p class="activity-analysis-message">Power and heart-rate streams are not available for this activity.</p>';
+
+  const width = 920, traceHeight = 230, histogramHeight = 180, gap = 24, readoutHeight = 32;
+  const usableSamples = Math.min(length, 1800);
+  const samples = [];
+  for (let i = 0; i < usableSamples; i += 1) {
+    const start = Math.floor(i * length / usableSamples);
+    const end = Math.max(start + 1, Math.floor((i + 1) * length / usableSamples));
+    const average = values => {
+      const valid = values.slice(start, end).map(Number).filter(Number.isFinite);
+      return valid.length ? valid.reduce((sum, value) => sum + value, 0) / valid.length : null;
+    };
+    samples.push({ t: Number(time[Math.min(end - 1, time.length - 1)]) || i, watts: average(watts), hr: average(heartrate), cadence: average(cadence) });
+  }
+  const maxWatts = Math.max(100, ...watts.map(Number).filter(Number.isFinite));
+  const minHr = 60;
+  const maxHr = Math.max(180, ...heartrate.map(Number).filter(Number.isFinite));
+  const startTime = samples[0].t;
+  const endTime = samples[samples.length - 1].t || startTime + 1;
+  const xFor = t => 46 + ((t - startTime) / Math.max(1, endTime - startTime)) * (width - 62);
+  const yForPower = value => traceHeight - 22 - (Math.max(0, value) / maxWatts) * (traceHeight - 45);
+  const yForHr = value => 18 + ((maxHr - value) / (maxHr - minHr)) * (traceHeight - 42);
+  const zoneBounds = Array.isArray(activity.icu_power_zones) ? activity.icu_power_zones : [55,75,90,105,120,150,999];
+  const ftp = Number(activity.icu_ftp) || 250;
+  const zoneFor = value => {
+    const percent = value / ftp * 100;
+    return Math.min(6, zoneBounds.findIndex(bound => percent <= bound) < 0 ? 6 : zoneBounds.findIndex(bound => percent <= bound));
+  };
+  const barWidth = (width - 62) / samples.length;
+  const powerBars = samples.map((sample, i) => sample.watts == null ? '' : `<rect x="${(46 + i * barWidth).toFixed(2)}" y="${yForPower(sample.watts).toFixed(2)}" width="${Math.max(.8, barWidth).toFixed(2)}" height="${(traceHeight - 22 - yForPower(sample.watts)).toFixed(2)}" fill="${ACTIVITY_POWER_ZONE_COLORS[zoneFor(sample.watts)]}"/>`).join('');
+  const hrPoints = samples.filter(sample => sample.hr != null).map(sample => `${xFor(sample.t).toFixed(2)},${yForHr(sample.hr).toFixed(2)}`).join(' ');
+  const cadencePoints = samples.filter(sample => sample.cadence != null).map(sample => `${xFor(sample.t).toFixed(2)},${(traceHeight - 22 - Math.min(100, sample.cadence) / 100 * 60).toFixed(2)}`).join(' ');
+
+  const powerBins = Array(24).fill(0), hrBins = Array(28).fill(0);
+  watts.forEach(value => { const n = Number(value); if (Number.isFinite(n) && n >= 0) powerBins[Math.min(powerBins.length - 1, Math.floor(n / 25))] += 1; });
+  heartrate.forEach(value => { const n = Number(value); if (Number.isFinite(n)) hrBins[Math.max(0, Math.min(hrBins.length - 1, Math.floor((n - minHr) / 5)))] += 1; });
+  const hist = (bins, left, top, chartWidth, chartHeight, colors) => {
+    const maxBin = Math.max(1, ...bins);
+    const bw = chartWidth / bins.length;
+    return bins.map((n, i) => {
+      const h = n / maxBin * (chartHeight - 22);
+      return `<rect x="${(left + i * bw).toFixed(2)}" y="${(top + chartHeight - h).toFixed(2)}" width="${Math.max(1, bw - 1).toFixed(2)}" height="${h.toFixed(2)}" fill="${colors(i)}"/>`;
+    }).join('');
+  };
+  const powerHistLeft = 0, hrHistLeft = 480, histTop = traceHeight + gap + readoutHeight;
+  const svg = `<svg class="activity-analysis-chart" viewBox="0 0 ${width} ${histTop + histogramHeight}" role="img" aria-label="Activity power, cadence, heart rate and zone distributions">
+    <rect x="0" y="0" width="${width}" height="${traceHeight}" rx="8" fill="#292929"/>${powerBars}
+    ${hrPoints ? `<polyline points="${hrPoints}" fill="none" stroke="#f04438" stroke-width="2" vector-effect="non-scaling-stroke"/>` : ''}
+    ${cadencePoints ? `<polyline points="${cadencePoints}" fill="none" stroke="#f2f2f2" stroke-width="1" opacity=".8" vector-effect="non-scaling-stroke"/>` : ''}
+    <line class="activity-tracer" x1="46" x2="46" y1="0" y2="208" visibility="hidden"/>
+    <g class="activity-chart-legend"><circle cx="16" cy="214" r="5" fill="#ef6543"/><text x="27" y="218">Power</text><circle cx="112" cy="214" r="5" fill="#f2f2f2"/><text x="123" y="218">Cadence</text><circle cx="222" cy="214" r="5" fill="#f04438"/><text x="233" y="218">Heart rate</text></g>
+    <rect x="0" y="${traceHeight + gap}" width="${width}" height="${readoutHeight}" fill="#f2f4f5"/>
+    <text class="activity-readout-label" x="16" y="${traceHeight + gap + 21}">Power <tspan id="tracer-power-value">—</tspan></text>
+    <text class="activity-readout-label" x="190" y="${traceHeight + gap + 21}">Heart rate <tspan id="tracer-hr-value">—</tspan></text>
+    <text class="activity-readout-hint" x="904" y="${traceHeight + gap + 21}" text-anchor="end">Move over profile to inspect</text>
+    <rect x="0" y="${histTop}" width="444" height="${histogramHeight}" rx="8" fill="#292929"/><rect x="476" y="${histTop}" width="444" height="${histogramHeight}" rx="8" fill="#292929"/>
+    <text class="activity-chart-heading" x="222" y="${histTop + 17}" text-anchor="middle">Power distribution</text><text class="activity-chart-heading" x="698" y="${histTop + 17}" text-anchor="middle">Heart rate distribution</text>
+    ${hist(powerBins, powerHistLeft + 16, histTop + 28, 412, histogramHeight - 38, i => ACTIVITY_POWER_ZONE_COLORS[zoneFor(i * 25 + 12)])}
+    ${hist(hrBins, hrHistLeft + 16, histTop + 28, 412, histogramHeight - 38, i => i < 8 ? '#3988f5' : i < 12 ? '#58bd5d' : i < 17 ? '#f2d23c' : i < 22 ? '#f58a29' : '#ed4336')}
+    <text class="activity-chart-axis" x="16" y="${histTop + histogramHeight - 5}">0 W</text><text class="activity-chart-axis" x="425" y="${histTop + histogramHeight - 5}" text-anchor="end">600 W</text>
+    <text class="activity-chart-axis" x="492" y="${histTop + histogramHeight - 5}">60 bpm</text><text class="activity-chart-axis" x="904" y="${histTop + histogramHeight - 5}" text-anchor="end">200 bpm</text>
+  </svg>`;
+  return `<section class="activity-analysis"><h3>Activity profile</h3>${svg}</section>`;
+}
+
+function attachActivityTracer(streams) {
+  const svg = workoutDialogContent.querySelector('.activity-analysis-chart');
+  if (!svg) return;
+  const line = svg.querySelector('.activity-tracer');
+  const powerOutput = svg.querySelector('#tracer-power-value');
+  const hrOutput = svg.querySelector('#tracer-hr-value');
+  const time = streams.time || [];
+  const watts = streams.watts || [];
+  const heartrate = streams.heartrate || [];
+  const sampleCount = Math.min(time.length, watts.length);
+  if (!sampleCount) return;
+  svg.addEventListener('pointermove', event => {
+    const bounds = svg.getBoundingClientRect();
+    const viewX = (event.clientX - bounds.left) / bounds.width * 920;
+    const viewY = (event.clientY - bounds.top) / bounds.height * Number(svg.viewBox.baseVal.height);
+    if (viewY > 230) return;
+    const progress = Math.max(0, Math.min(1, (viewX - 46) / (920 - 62)));
+    const x = 46 + progress * (920 - 62);
+    const index = Math.round(progress * (sampleCount - 1));
+    line.setAttribute('x1', x.toFixed(2));
+    line.setAttribute('x2', x.toFixed(2));
+    line.setAttribute('visibility', 'visible');
+    const power = Number(watts[index]);
+    const hr = Number(heartrate[Math.min(index, heartrate.length - 1)]);
+    powerOutput.textContent = Number.isFinite(power) ? `${Math.round(power)} W` : '—';
+    hrOutput.textContent = Number.isFinite(hr) ? `${Math.round(hr)} bpm` : '—';
+  });
+  svg.addEventListener('pointerleave', () => {
+    line.setAttribute('visibility', 'hidden');
+    powerOutput.textContent = '—';
+    hrOutput.textContent = '—';
+  });
 }
 
 const BLOCK_PRESETS = [
@@ -255,9 +475,11 @@ function workoutMarkup(event, index) {
   const sourceClass = event._source === 'activity' ? 'activity' : 'planned';
   const restrictedClass = isRestricted ? 'restricted' : '';
   const fallbackMeta = isRestricted ? 'Details unavailable via API' : sourceClass === 'planned' ? 'Planned' : 'Activity';
+  const skyline = sourceClass === 'activity' ? skylineMarkup(event) : '';
   return `<button class="workout-card ${kind} ${sourceClass} ${restrictedClass}" type="button" data-event-index="${index}" aria-label="${escapeHTML(showType)}: ${escapeHTML(name)}">
     <span class="workout-type"><i class="sport-icon" aria-hidden="true">${sportGlyph(showType)}</i>${escapeHTML(showType)}</span>
     <span class="workout-title">${escapeHTML(name)}</span>
+    ${skyline}
     <span class="workout-meta">${meta || `<span>${escapeHTML(fallbackMeta)}</span>`}</span>
     ${description}
   </button>`;
@@ -434,14 +656,49 @@ function openWorkout(event) {
   const sportLabel = event.type || (isRestricted ? 'Strava activity' : 'Workout');
   const title = event.name || (isRestricted ? 'Activity details unavailable' : event.type || 'Workout');
   const description = event.description || event._note;
+  const analysis = event._source === 'activity' ? '<div class="activity-analysis-placeholder" role="status">Loading activity streams…</div>' : '';
   workoutDialogContent.innerHTML = `<div class="workout-detail-top"><span class="workout-detail-sport" style="--sport-color:var(--${kind})"><i></i>${escapeHTML(sportLabel)}</span><button class="dialog-close" type="button" data-close-workout aria-label="Close">×</button></div>
     <div class="workout-detail-date">${escapeHTML(dateText)}</div>
     <h2 id="workout-dialog-title">${escapeHTML(title)}</h2>
     <div class="workout-detail-metrics">${metrics.map(([label, value]) => `<span>${label}<strong>${escapeHTML(value)}</strong></span>`).join('')}</div>
+    ${analysis}
     ${description ? `<div class="workout-description-full">${escapeHTML(description)}</div>` : '<div class="workout-description-full">No workout notes.</div>'}
     ${event._local ? '<p class="builder-note">Saved in this browser only · Not synced to Intervals.icu</p>' : ''}
     <div class="workout-dialog-actions">${event._sample || event._local ? '' : '<a class="icu-link" href="https://intervals.icu" target="_blank" rel="noreferrer">Open Intervals.icu ↗</a>'}<button type="button" data-close-workout>Done</button></div>`;
   workoutDialog.showModal();
+  if (event._source === 'activity') loadActivityAnalysis(event);
+}
+
+async function loadActivityAnalysis(activity) {
+  const id = String(activity.id || '');
+  const credentials = apiCredentials;
+  if (!id || !credentials?.apiKey) {
+    const placeholder = workoutDialogContent.querySelector('.activity-analysis-placeholder');
+    if (placeholder) placeholder.textContent = 'Connect to Intervals.icu to load the power and heart-rate streams.';
+    return;
+  }
+  const target = workoutDialogContent.querySelector('.activity-analysis-placeholder');
+  if (!target) return;
+  try {
+    let streams = readActivityStreamCache(id);
+    if (!streams) {
+      const query = new URLSearchParams({ types: 'time,watts,heartrate,cadence' });
+      const response = await fetch(`${API_BASE}/activity/${encodeURIComponent(id)}/streams.json?${query}`, {
+        headers: { Authorization: apiBasicAuth(credentials.apiKey), Accept: 'application/json' },
+        cache: 'no-store'
+      });
+      if (!response.ok) throw new Error(`Could not load activity streams (${response.status}).`);
+      streams = streamMap(await response.json());
+      writeActivityStreamCache(id, streams);
+    }
+    if (!workoutDialog.open || workoutDialogContent.querySelector('.activity-analysis-placeholder') !== target) return;
+    target.outerHTML = activityAnalysisMarkup(streams, activity);
+    attachActivityTracer(streams);
+  } catch (error) {
+    if (!workoutDialog.open || workoutDialogContent.querySelector('.activity-analysis-placeholder') !== target) return;
+    target.textContent = `${error.message} The activity summary and calendar thumbnail are still available.`;
+    target.classList.add('activity-analysis-error');
+  }
 }
 
 function cloneBlockPreset(key) {
