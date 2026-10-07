@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#ffffff" />
+    <meta name="description" content="A personal training calendar powered by Intervals.icu" />
+    <title>Stride — Training calendar</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <a class="brand" href="#calendar" aria-label="Stride calendar">
+        <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+        <span>stride<span class="brand-period">.</span></span>
+      </a>
+      <span class="header-divider" aria-hidden="true"></span>
+      <div class="month-controls">
+        <h1 id="month-title">October 2026</h1>
+        <button class="today-button" id="today-button" type="button">Today</button>
+        <button class="icon-button month-arrow" id="previous-month" type="button" aria-label="Previous month"><svg viewBox="0 0 24 24"><path d="m14.5 5-7 7 7 7"/></svg></button>
+        <button class="icon-button month-arrow" id="next-month" type="button" aria-label="Next month"><svg viewBox="0 0 24 24"><path d="m9.5 5 7 7-7 7"/></svg></button>
+      </div>
+      <div class="header-actions">
+        <span class="sync-status" id="sync-status"><span class="sync-indicator"></span><span id="sync-text">Sample calendar</span></span>
+        <button class="icon-button settings-button" id="settings-button" type="button" aria-label="Connection settings" title="Connection settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"/><path d="m19.4 15 .1.1a1.8 1.8 0 1 1-2.5 2.5l-.1-.1a1.8 1.8 0 0 0-3.1 1.3v.2a1.8 1.8 0 1 1-3.6 0v-.2a1.8 1.8 0 0 0-3.1-1.3l-.1.1a1.8 1.8 0 1 1-2.5-2.5l.1-.1a1.8 1.8 0 0 0-1.3-3.1h-.2a1.8 1.8 0 1 1 0-3.6h.2a1.8 1.8 0 0 0 1.3-3.1l-.1-.1a1.8 1.8 0 1 1 2.5-2.5l.1.1a1.8 1.8 0 0 0 3.1-1.3v-.2a1.8 1.8 0 1 1 3.6 0v.2a1.8 1.8 0 0 0 3.1 1.3l.1-.1a1.8 1.8 0 1 1 2.5 2.5l-.1.1a1.8 1.8 0 0 0 1.3 3.1h.2a1.8 1.8 0 1 1 0 3.6h-.2a1.8 1.8 0 0 0-1.3 3.1Z"/></svg>
+        </button>
+        <button class="connect-button" id="connect-button" type="button"><span class="connection-dot" id="connection-dot"></span><span id="connection-label">Connect Intervals.icu</span></button>
+      </div>
+    </header>
+
+    <main class="calendar-page" id="calendar">
+      <div class="calendar-table" aria-label="Monthly training calendar">
+        <div class="weekdays" aria-hidden="true">
+          <span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span><span class="summary-heading">SUMMARY</span>
+        </div>
+        <div class="calendar-weeks" id="calendar-weeks" aria-live="polite"></div>
+      </div>
+      <footer class="page-footer"><span id="calendar-footnote">Sample workouts · Connect Intervals.icu to load your calendar</span><span>Powered by Intervals.icu</span></footer>
+    </main>
+
+    <dialog class="connect-dialog" id="connect-dialog" aria-labelledby="dialog-title">
+      <form id="connect-form" method="dialog">
+        <div class="dialog-header">
+          <span class="dialog-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+          <button class="dialog-close" id="close-dialog" type="button" aria-label="Close">×</button>
+        </div>
+        <p class="eyebrow">PERSONAL CONNECTION</p>
+        <h2 id="dialog-title">Connect your calendar</h2>
+        <p class="dialog-description">Use your Intervals.icu API key to load planned workouts. You can find it in <strong>Settings → Developer Settings</strong>.</p>
+        <label for="athlete-id">Athlete ID <span>Use 0 for your own account</span></label>
+        <input id="athlete-id" name="athleteId" type="text" value="0" autocomplete="off" required />
+        <label for="api-key">Personal API key</label>
+        <input id="api-key" name="apiKey" type="password" placeholder="Paste your API key" autocomplete="new-password" required />
+        <p class="form-message" id="form-message" role="status" aria-live="polite"></p>
+        <button class="dialog-submit" id="dialog-submit" type="submit"><span id="submit-label">Connect and load calendar</span><span aria-hidden="true">→</span></button>
+        <button class="disconnect-button" id="disconnect-button" type="button" hidden>Disconnect this browser</button>
+        <p class="privacy-note"><span aria-hidden="true">⌑</span> Your key stays in this browser tab and is sent directly to Intervals.icu. This personal-key setup is intended for your own use.</p>
+      </form>
+    </dialog>
+
+    <dialog class="workout-dialog" id="workout-dialog" aria-labelledby="workout-dialog-title">
+      <div class="workout-dialog-content" id="workout-dialog-content"></div>
+    </dialog>
+  </body>
+</html>
