@@ -544,6 +544,7 @@ function workoutMarkup(event, index) {
 function renderCalendar() {
   monthTitle.textContent = formatMonth(visibleMonth);
   const weeks = getVisibleWeeks();
+  weeksRoot.style.setProperty('--week-count', weeks.length);
   const grouped = getEventsByDate();
   for (const event of localWorkouts) {
     const date = parseLocalDate(event.start_date_local);
