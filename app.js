@@ -20,14 +20,21 @@ const workoutDialogContent = document.querySelector('#workout-dialog-content');
 const now = new Date();
 let visibleMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 let events = [];
+let wellnessByDate = new Map();
 let localWorkouts = readLocalWorkouts();
 let viewMode = 'month';
 let apiCredentials = readCredentials();
 let requestSequence = 0;
 let builderBlocks = [];
 let builderBlockSequence = 0;
+let editingEvent = null;
+let editingActivity = null;
+let deletingActivity = null;
 let activeChartAdjustment = null;
 let activeChartBlockDrag = null;
+let calendarDraggedEventId = null;
+let suppressCalendarClick = false;
+let calendarClipboard = null;
 
 const CHART_GEOMETRY = { left: 42, right: 1615, top: 40, bottom: 184, width: 1573, height: 144 };
 const POWER_ZONES = [
@@ -339,6 +346,7 @@ function formatMonth(date) {
 
 function formatDuration(seconds) {
   if (!Number.isFinite(Number(seconds)) || Number(seconds) <= 0) return '';
+  if (Number(seconds) < 60) return `${Math.round(Number(seconds))}s`;
   const minutes = Math.round(Number(seconds) / 60);
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
@@ -363,11 +371,11 @@ function formatDistance(meters) {
 }
 
 function eventDuration(event) {
-  return event.moving_time ?? event.workout_doc?.duration ?? event.duration ?? 0;
+  return [event.moving_time, event.workout_doc?.duration, event.duration].find(value => Number(value) > 0) ?? 0;
 }
 
 function eventDistance(event) {
-  return event.distance ?? event.workout_doc?.distance ?? 0;
+  return [event.distance, event.workout_doc?.distance].find(value => Number(value) > 0) ?? 0;
 }
 
 function sportClass(type = '') {
@@ -379,9 +387,27 @@ function sportClass(type = '') {
   return 'other';
 }
 
-function sportGlyph(type = '') {
+function isStrengthType(type = '') {
+  return ['strength', 'weighttraining', 'weight training'].includes(String(type).toLowerCase());
+}
+
+function displaySportType(type = '') {
+  return isStrengthType(type) ? 'Strength' : type;
+}
+
+function sportIconMarkup(type = '') {
   const kind = sportClass(type);
-  return ({ ride: '↗', run: '›', strength: '✳', swim: '≈', other: '•' })[kind];
+  const imageIcons = {
+    ride: 'bike.png',
+    run: 'runner.png',
+    strength: 'dumbbell.png'
+  };
+  if (imageIcons[kind]) return `<img src="assets/session-icons/${imageIcons[kind]}" alt="" draggable="false">`;
+  const icons = {
+    swim: '<path d="M2 8c1.3-1 2.7-1 4 0s2.7 1 4 0 2.7-1 4 0M2 11c1.3-1 2.7-1 4 0s2.7 1 4 0 2.7-1 4 0"/><circle cx="10.8" cy="3.5" r="1.1"/>',
+    other: '<circle cx="7" cy="7" r="4.3"/><path d="M7 4.8v4.4M4.8 7h4.4"/>'
+  }[kind];
+  return `<svg viewBox="0 0 14 14" aria-hidden="true" focusable="false">${icons}</svg>`;
 }
 
 function escapeHTML(value = '') {
@@ -436,6 +462,30 @@ function getEventsByDate() {
   return grouped;
 }
 
+function wellnessMetrics(record) {
+  if (!record) return [];
+  const metrics = [];
+  const sleepSeconds = Number(record.sleepSecs);
+  const hrv = Number(record.hrv);
+  const restingHR = Number(record.restingHR);
+  if (Number.isFinite(sleepSeconds) && sleepSeconds > 0) {
+    const hours = sleepSeconds / 3600;
+    metrics.push(['Sleep', `${Math.floor(hours)}h ${Math.round((hours % 1) * 60)}m`]);
+  }
+  if (Number.isFinite(hrv) && hrv > 0) metrics.push(['HRV', `${Math.round(hrv)} ms`]);
+  if (Number.isFinite(restingHR) && restingHR > 0) metrics.push(['Rest HR', `${Math.round(restingHR)} bpm`]);
+  return metrics;
+}
+
+function wellnessMarkup(record, detailed = false) {
+  const metrics = wellnessMetrics(record);
+  if (!metrics.length) return '';
+  if (detailed) {
+    return `<section class="wellness-detail" aria-label="Daily health metrics"><h3>Daily health</h3><div class="wellness-detail-metrics">${metrics.map(([label, value]) => `<span>${label}<strong>${escapeHTML(value)}</strong></span>`).join('')}</div></section>`;
+  }
+  return `<div class="wellness-summary" aria-label="Daily health: ${escapeHTML(metrics.map(([label, value]) => `${label} ${value}`).join(', '))}">${metrics.map(([label, value]) => `<span><b>${label}</b> ${escapeHTML(value)}</span>`).join('')}</div>`;
+}
+
 function summaryMarkup(weekEvents) {
   const totalSeconds = weekEvents.reduce((sum, event) => sum + Number(eventDuration(event) || 0), 0);
   const totalLoad = weekEvents.reduce((sum, event) => sum + Number(event.icu_training_load || 0), 0);
@@ -471,18 +521,24 @@ function workoutMarkup(event, index) {
   const name = event.name || (isRestricted ? 'Activity details unavailable' : event.type || 'Workout');
   const note = event.description || event._note;
   const description = note ? `<div class="workout-description">${escapeHTML(note.split('\n')[0])}</div>` : '';
-  const showType = event.type || (isRestricted ? 'Strava activity' : 'Workout');
+  const showType = event.type ? displaySportType(event.type) : (isRestricted ? 'Strava activity' : 'Workout');
   const sourceClass = event._source === 'activity' ? 'activity' : 'planned';
   const restrictedClass = isRestricted ? 'restricted' : '';
   const fallbackMeta = isRestricted ? 'Details unavailable via API' : sourceClass === 'planned' ? 'Planned' : 'Activity';
   const skyline = sourceClass === 'activity' ? skylineMarkup(event) : '';
-  return `<button class="workout-card ${kind} ${sourceClass} ${restrictedClass}" type="button" data-event-index="${index}" aria-label="${escapeHTML(showType)}: ${escapeHTML(name)}">
-    <span class="workout-type"><i class="sport-icon" aria-hidden="true">${sportGlyph(showType)}</i>${escapeHTML(showType)}</span>
+  const canDelete = (event._source === 'planned' || event._source === 'activity') && Boolean(event.id) && !event._sample && !event._local;
+  const canDrag = event._source === 'planned' && Boolean(event.id) && !event._sample && !event._local;
+  const isPaired = event._source === 'activity'
+    ? Boolean(event.paired_event_id)
+    : event._source === 'planned' && events.some(item => item._source === 'activity' && String(item.paired_event_id) === String(event.id));
+  const paired = isPaired ? ' paired' : '';
+  return `<div class="workout-card-wrap"><button class="workout-card ${kind} ${sourceClass} ${restrictedClass}${paired}" type="button" data-event-index="${index}"${canDrag ? ' draggable="true" title="Drag to another day or onto a completed activity to pair"' : ''} aria-label="${escapeHTML(showType)}: ${escapeHTML(name)}">
+    <span class="workout-type"><i class="sport-icon" aria-hidden="true">${sportIconMarkup(showType)}</i>${escapeHTML(showType)}</span>
     <span class="workout-title">${escapeHTML(name)}</span>
     ${skyline}
     <span class="workout-meta">${meta || `<span>${escapeHTML(fallbackMeta)}</span>`}</span>
-    ${description}
-  </button>`;
+    ${description}${paired ? '<span class="paired-indicator" title="This workout is paired with a completed activity">Paired</span>' : ''}
+  </button>${canDelete ? `<button class="calendar-delete" type="button" data-calendar-delete="${index}" aria-label="Delete ${escapeHTML(name)}" title="Delete workout or activity">×</button>` : ''}</div>`;
 }
 
 function renderCalendar() {
@@ -505,6 +561,7 @@ function renderCalendar() {
     const daysMarkup = week.map(date => {
       const key = dateKey(date);
       const dayEvents = grouped.get(key) ?? [];
+      const wellness = wellnessByDate.get(key);
       const isToday = key === todayKey;
       const outsideMonth = date.getMonth() !== visibleMonthNumber;
       const displayMonth = date.getDate() === 1 || (outsideMonth && weekIndex === weeks.length - 1 && date.getDay() === 1);
@@ -512,9 +569,18 @@ function renderCalendar() {
         const eventIndex = flatEvents.push(event) - 1;
         return workoutMarkup(event, eventIndex);
       }).join('');
-      return `<section class="day-cell${outsideMonth ? ' outside-month' : ''}${isToday ? ' is-today' : ''}" role="gridcell" aria-label="${escapeHTML(new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).format(date))}">
-        <div class="day-head"><span class="day-number">${date.getDate()}${displayMonth ? `<span class="day-label-month">${new Intl.DateTimeFormat(undefined, { month: 'short' }).format(date)}</span>` : ''}</span>${dayEvents.length ? '<span class="day-menu" aria-hidden="true">⋮</span>' : ''}</div>
-        <div class="workout-list">${cards}<button class="add-workout" type="button" data-add-workout="${key}" aria-label="Create workout on ${escapeHTML(new Intl.DateTimeFormat(undefined, { month: 'long', day: 'numeric' }).format(date))}" title="Create workout"><span aria-hidden="true">＋</span></button></div>
+      const dayWorkoutEvents = dayEvents.filter(item => item._source === 'planned' && !item._sample && !item._local || item._local);
+      const dayDeleteCount = dayEvents.filter(item => (item._source === 'planned' || item._source === 'activity') && !item._sample && !item._local).length + dayEvents.filter(item => item._local).length;
+      return `<section class="day-cell${outsideMonth ? ' outside-month' : ''}${isToday ? ' is-today' : ''}" role="gridcell" data-day-key="${key}" aria-label="${escapeHTML(new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).format(date))}">
+        <div class="day-head"><span class="day-number">${date.getDate()}${displayMonth ? `<span class="day-label-month">${new Intl.DateTimeFormat(undefined, { month: 'short' }).format(date)}</span>` : ''}</span><button type="button" class="day-menu-button" data-day-menu aria-label="Actions for ${escapeHTML(new Intl.DateTimeFormat(undefined, { month: 'long', day: 'numeric' }).format(date))}" aria-haspopup="menu" aria-expanded="false"><span class="day-menu-icon" aria-hidden="true"><i></i><i></i><i></i></span></button><div class="day-menu-popover" role="menu" hidden>
+          <button type="button" role="menuitem" data-day-action="add" data-day-key="${key}">Add workout</button>
+          <button type="button" role="menuitem" data-day-action="copy" data-day-key="${key}"${dayWorkoutEvents.length ? '' : ' disabled'}>Copy</button>
+          <button type="button" role="menuitem" data-day-action="cut" data-day-key="${key}"${dayWorkoutEvents.length ? '' : ' disabled'}>Cut</button>
+          ${calendarClipboard?.length ? `<button type="button" role="menuitem" data-day-action="paste" data-day-key="${key}">Paste ${calendarClipboard.length} workout${calendarClipboard.length === 1 ? '' : 's'}</button>` : ''}
+          <span class="day-menu-separator" role="separator"></span>
+          <button type="button" role="menuitem" class="day-menu-delete" data-day-action="delete" data-day-key="${key}"${dayDeleteCount ? '' : ' disabled'}>Delete day</button>
+        </div></div>
+        <div class="workout-list">${cards}${wellnessMarkup(wellness)}<button class="add-workout" type="button" data-add-workout="${key}" aria-label="Create workout on ${escapeHTML(new Intl.DateTimeFormat(undefined, { month: 'long', day: 'numeric' }).format(date))}" title="Create workout"><span aria-hidden="true">＋</span></button></div>
       </section>`;
     }).join('');
     const weekStart = week[0];
@@ -567,8 +633,10 @@ async function loadCalendar(credentials, { openOnError = false } = {}) {
   const athlete = encodeURIComponent(credentials.athleteId || '0');
   const eventQuery = new URLSearchParams({ oldest, newest, category: 'WORKOUT' });
   const activityQuery = new URLSearchParams({ oldest, newest });
+  const wellnessQuery = new URLSearchParams({ oldest, newest });
   const eventsUrl = `${API_BASE}/athlete/${athlete}/events?${eventQuery}`;
   const activitiesUrl = `${API_BASE}/athlete/${athlete}/activities?${activityQuery}`;
+  const wellnessUrl = `${API_BASE}/athlete/${athlete}/wellness?${wellnessQuery}`;
   setLoading(true);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 20000);
@@ -594,9 +662,10 @@ async function loadCalendar(credentials, { openOnError = false } = {}) {
       if (!Array.isArray(payload)) throw new Error('The API response was not a list of calendar entries.');
       return payload;
     };
-    const [plannedWorkouts, completedActivities] = await Promise.all([
+    const [plannedWorkouts, completedActivities, wellnessRecords] = await Promise.all([
       fetchList(eventsUrl),
-      fetchList(activitiesUrl)
+      fetchList(activitiesUrl),
+      fetchList(wellnessUrl).catch(() => [])
     ]);
     if (sequence !== requestSequence) return;
     events = [
@@ -605,6 +674,7 @@ async function loadCalendar(credentials, { openOnError = false } = {}) {
         .map(event => ({ ...event, _source: 'planned' })),
       ...completedActivities.map(activity => ({ ...activity, _source: 'activity' }))
     ];
+    wellnessByDate = new Map(wellnessRecords.filter(record => record?.id).map(record => [String(record.id), record]));
     saveCredentials(credentials);
     renderCalendar();
     setConnectionState(true, 'Intervals.icu');
@@ -632,6 +702,119 @@ async function loadCalendar(credentials, { openOnError = false } = {}) {
   }
 }
 
+async function updateCalendarEntry(url, body, action) {
+  const response = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      Authorization: apiBasicAuth(apiCredentials.apiKey),
+      Accept: 'application/json',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body),
+    cache: 'no-store'
+  });
+  if (!response.ok) {
+    if (response.status === 401 || response.status === 403) throw new Error('Intervals.icu rejected this API key or athlete ID. Check your connection settings.');
+    throw new Error(`Intervals.icu could not ${action} (${response.status}).`);
+  }
+  const text = await response.text();
+  if (!text.trim()) return body;
+  try {
+    const result = JSON.parse(text);
+    return result && typeof result === 'object' && !Array.isArray(result) ? { ...body, ...result } : body;
+  } catch {
+    return body;
+  }
+}
+
+async function reschedulePlannedWorkout(event, dayKey) {
+  const athlete = encodeURIComponent(apiCredentials?.athleteId || '0');
+  const url = `${API_BASE}/athlete/${athlete}/events/${encodeURIComponent(event.id)}`;
+  const body = { ...event, start_date_local: `${dayKey}T00:00:00` };
+  delete body._source;
+  delete body._sample;
+  delete body._local;
+  try {
+    const updated = await updateCalendarEntry(url, body, 'move this workout');
+    events = events.map(item => String(item.id) === String(event.id) ? { ...updated, _source: 'planned' } : item);
+    renderCalendar();
+    setConnectionState(true, 'Workout rescheduled');
+  } catch (error) {
+    syncText.textContent = error.message;
+  }
+}
+
+async function pairPlannedWorkout(event, activity) {
+  const athlete = encodeURIComponent(apiCredentials?.athleteId || '0');
+  const url = `${API_BASE}/activity/${encodeURIComponent(activity.id)}`;
+  try {
+    const response = await fetch(url, {
+      headers: { Authorization: apiBasicAuth(apiCredentials.apiKey), Accept: 'application/json' },
+      cache: 'no-store'
+    });
+    if (!response.ok) throw new Error(`Intervals.icu could not load the activity details (${response.status}).`);
+    const fullActivity = await response.json();
+    const updated = await updateCalendarEntry(url, { ...fullActivity, paired_event_id: Number(event.id) }, 'pair this workout with the activity');
+    events = events.map(item => String(item.id) === String(activity.id) ? { ...item, ...updated, _source: 'activity' } : item);
+    renderCalendar();
+    setConnectionState(true, 'Workout paired with activity');
+  } catch (error) {
+    syncText.textContent = error.message;
+  }
+}
+
+weeksRoot.addEventListener('dragstart', event => {
+  const card = event.target.closest('[data-event-index][draggable="true"]');
+  if (!card || !event.dataTransfer) return;
+  const selected = JSON.parse(weeksRoot.dataset.events || '[]')[Number(card.dataset.eventIndex)];
+  if (!selected || selected._source !== 'planned') return;
+  calendarDraggedEventId = String(selected.id);
+  event.dataTransfer.setData('application/x-intervals-planned-event', calendarDraggedEventId);
+  event.dataTransfer.effectAllowed = 'move';
+  card.classList.add('calendar-dragging');
+});
+
+weeksRoot.addEventListener('dragover', event => {
+  if (!calendarDraggedEventId) return;
+  const targetDay = event.target.closest('.day-cell');
+  const targetCard = event.target.closest('[data-event-index]');
+  if (!targetDay && !targetCard) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+  weeksRoot.querySelectorAll('.calendar-drop-target').forEach(node => node.classList.remove('calendar-drop-target'));
+  (targetCard || targetDay).classList.add('calendar-drop-target');
+});
+
+weeksRoot.addEventListener('drop', event => {
+  if (!calendarDraggedEventId || !event.dataTransfer) return;
+  const id = event.dataTransfer.getData('application/x-intervals-planned-event') || calendarDraggedEventId;
+  const planned = events.find(item => item._source === 'planned' && String(item.id) === id);
+  if (!planned) return;
+  const targetCard = event.target.closest('[data-event-index]');
+  const allEvents = JSON.parse(weeksRoot.dataset.events || '[]');
+  const targetEvent = targetCard ? allEvents[Number(targetCard.dataset.eventIndex)] : null;
+  if (targetEvent?._source === 'activity') {
+    event.preventDefault();
+    if (!targetEvent.paired_event_id || String(targetEvent.paired_event_id) !== String(planned.id)) pairPlannedWorkout(planned, targetEvent);
+  } else {
+    const targetDay = event.target.closest('.day-cell');
+    if (targetDay?.dataset.dayKey) {
+      event.preventDefault();
+      const currentDate = parseLocalDate(planned.start_date_local);
+      if (!currentDate || dateKey(currentDate) !== targetDay.dataset.dayKey) reschedulePlannedWorkout(planned, targetDay.dataset.dayKey);
+    }
+  }
+  calendarDraggedEventId = null;
+  suppressCalendarClick = true;
+  setTimeout(() => { suppressCalendarClick = false; }, 0);
+  weeksRoot.querySelectorAll('.calendar-drop-target, .calendar-dragging').forEach(node => node.classList.remove('calendar-drop-target', 'calendar-dragging'));
+});
+
+weeksRoot.addEventListener('dragend', () => {
+  calendarDraggedEventId = null;
+  weeksRoot.querySelectorAll('.calendar-drop-target, .calendar-dragging').forEach(node => node.classList.remove('calendar-drop-target', 'calendar-dragging'));
+});
+
 function openConnectionDialog(message = '') {
   formMessage.textContent = message;
   formMessage.classList.remove('success');
@@ -653,20 +836,147 @@ function openWorkout(event) {
     ['DISTANCE', formatDistance(eventDistance(event))],
     [event._source === 'activity' ? 'TSS' : 'PLANNED TSS', Number(event.icu_training_load) > 0 ? Math.round(event.icu_training_load) : '—']
   ].filter(([, value]) => value !== '');
-  const sportLabel = event.type || (isRestricted ? 'Strava activity' : 'Workout');
+  const sportLabel = event.type ? displaySportType(event.type) : (isRestricted ? 'Strava activity' : 'Workout');
   const title = event.name || (isRestricted ? 'Activity details unavailable' : event.type || 'Workout');
   const description = event.description || event._note;
+  const canManage = event._source === 'planned' && Boolean(event.id) && !event._sample && !event._local;
+  const canManageActivity = event._source === 'activity' && Boolean(event.id) && !event._sample && !event._local;
+  const wellness = wellnessMarkup(wellnessByDate.get(date ? dateKey(date) : ''), true);
   const analysis = event._source === 'activity' ? '<div class="activity-analysis-placeholder" role="status">Loading activity streams…</div>' : '';
   workoutDialogContent.innerHTML = `<div class="workout-detail-top"><span class="workout-detail-sport" style="--sport-color:var(--${kind})"><i></i>${escapeHTML(sportLabel)}</span><button class="dialog-close" type="button" data-close-workout aria-label="Close">×</button></div>
     <div class="workout-detail-date">${escapeHTML(dateText)}</div>
     <h2 id="workout-dialog-title">${escapeHTML(title)}</h2>
     <div class="workout-detail-metrics">${metrics.map(([label, value]) => `<span>${label}<strong>${escapeHTML(value)}</strong></span>`).join('')}</div>
+    ${wellness}
     ${analysis}
     ${description ? `<div class="workout-description-full">${escapeHTML(description)}</div>` : '<div class="workout-description-full">No workout notes.</div>'}
+    <p class="builder-note error" id="workout-action-message" role="status"></p>
     ${event._local ? '<p class="builder-note">Saved in this browser only · Not synced to Intervals.icu</p>' : ''}
-    <div class="workout-dialog-actions">${event._sample || event._local ? '' : '<a class="icu-link" href="https://intervals.icu" target="_blank" rel="noreferrer">Open Intervals.icu ↗</a>'}<button type="button" data-close-workout>Done</button></div>`;
-  workoutDialog.showModal();
+    <div class="workout-dialog-actions">${event._sample || event._local ? '' : '<a class="icu-link" href="https://intervals.icu" target="_blank" rel="noreferrer">Open Intervals.icu ↗</a>'}${canManage ? `<span class="workout-manage-actions"><button type="button" data-edit-event="${escapeHTML(String(event.id))}">Edit</button><button type="button" class="delete-workout" data-delete-event="${escapeHTML(String(event.id))}">Delete</button></span>` : ''}${canManageActivity ? `<span class="workout-manage-actions"><button type="button" data-edit-activity="${escapeHTML(String(event.id))}">Edit name</button><button type="button" class="delete-workout" data-delete-activity="${escapeHTML(String(event.id))}">Delete</button></span>` : ''}<button type="button" data-close-workout>Done</button></div>`;
+  if (!workoutDialog.open) workoutDialog.showModal();
   if (event._source === 'activity') loadActivityAnalysis(event);
+}
+
+async function deletePlannedWorkout(event, button) {
+  const name = event.name || 'this planned workout';
+  if (!window.confirm(`Delete “${name}” from your Intervals.icu calendar? This cannot be undone.`)) return;
+  const athlete = encodeURIComponent(apiCredentials?.athleteId || '0');
+  const url = `${API_BASE}/athlete/${athlete}/events/${encodeURIComponent(event.id)}`;
+  button.disabled = true;
+  try {
+    const response = await fetch(url, {
+      method: 'DELETE',
+      headers: { Authorization: apiBasicAuth(apiCredentials.apiKey), Accept: 'application/json' },
+      cache: 'no-store'
+    });
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) throw new Error('Intervals.icu rejected this API key or athlete ID. Check your connection settings.');
+      throw new Error(`Intervals.icu could not delete this workout (${response.status}).`);
+    }
+    events = events.filter(item => String(item.id) !== String(event.id));
+    renderCalendar();
+    if (workoutDialog.open) workoutDialog.close();
+  } catch (error) {
+    const message = workoutDialogContent.querySelector('#workout-action-message');
+    if (message) message.textContent = error instanceof TypeError ? 'Could not reach Intervals.icu. Check your connection and try again.' : error.message;
+    else syncText.textContent = error instanceof TypeError ? 'Could not reach Intervals.icu. Check your connection and try again.' : error.message;
+    button.disabled = false;
+  }
+}
+
+function openActivityNameEditor(activity) {
+  editingActivity = activity;
+  editingEvent = null;
+  workoutDialogContent.innerHTML = `<form class="activity-name-form" id="activity-name-form" aria-labelledby="activity-name-title">
+    <div class="workout-detail-top"><span class="workout-detail-sport">EDIT COMPLETED ACTIVITY</span><button class="dialog-close" type="button" data-close-workout aria-label="Close">×</button></div>
+    <h2 id="activity-name-title">Edit activity name</h2>
+    <label class="builder-field">Name<input name="name" maxlength="120" value="${escapeHTML(activity.name || '')}" required></label>
+    <p class="builder-note error" id="activity-action-message" role="status"></p>
+    <div class="builder-actions"><button type="button" data-close-workout>Cancel</button><button class="builder-save" type="submit">Save name</button></div>
+  </form>`;
+  if (!workoutDialog.open) workoutDialog.showModal();
+  workoutDialogContent.querySelector('[name="name"]').focus();
+}
+
+function openActivityDeleteConfirm(activity) {
+  deletingActivity = activity;
+  workoutDialogContent.innerHTML = `<section class="activity-delete-confirm" role="alertdialog" aria-labelledby="activity-delete-title" aria-describedby="activity-delete-description">
+    <div class="workout-detail-top"><span class="workout-detail-sport">DELETE COMPLETED ACTIVITY</span></div>
+    <h2 id="activity-delete-title">Delete this activity?</h2>
+    <p id="activity-delete-description">“${escapeHTML(activity.name || activity.type || 'Completed activity')}” will be deleted from Intervals.icu. This cannot be undone.</p>
+    <p class="builder-note error" id="activity-action-message" role="status"></p>
+    <div class="builder-actions"><button type="button" data-cancel-activity-delete>Cancel</button><button type="button" class="delete-workout" data-confirm-delete-activity>Delete activity</button></div>
+  </section>`;
+  if (!workoutDialog.open) workoutDialog.showModal();
+  workoutDialogContent.querySelector('[data-cancel-activity-delete]').focus();
+}
+
+async function saveActivityName(activity, name, button) {
+  const message = workoutDialogContent.querySelector('#activity-action-message');
+  if (!apiCredentials) {
+    message.textContent = 'Connect your Intervals.icu account before editing this activity.';
+    return;
+  }
+  const trimmedName = name.trim();
+  if (!trimmedName) return;
+  button.disabled = true;
+  button.textContent = 'Saving…';
+  try {
+    const response = await fetch(`${API_BASE}/activity/${encodeURIComponent(activity.id)}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: apiBasicAuth(apiCredentials.apiKey),
+        Accept: 'application/json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ name: trimmedName }),
+      cache: 'no-store'
+    });
+    if (!response.ok) throw new Error(`Intervals.icu could not update this activity (${response.status}).`);
+    const responseBody = await response.text();
+    let updated = { ...activity, name: trimmedName };
+    if (responseBody.trim()) {
+      try {
+        const payload = JSON.parse(responseBody);
+        if (payload && typeof payload === 'object' && !Array.isArray(payload)) updated = { ...updated, ...payload, name: payload.name || trimmedName };
+      } catch { /* A successful update may return an empty body. */ }
+    }
+    events = events.map(item => String(item.id) === String(activity.id) ? { ...updated, _source: 'activity' } : item);
+    renderCalendar();
+    editingActivity = null;
+    workoutDialog.close();
+    openWorkout(events.find(item => String(item.id) === String(activity.id)) || updated);
+  } catch (error) {
+    message.textContent = error instanceof TypeError ? 'Could not reach Intervals.icu. Check your connection and try again.' : error.message;
+    button.disabled = false;
+    button.textContent = 'Save name';
+  }
+}
+
+async function deleteCompletedActivity(activity, button) {
+  const message = workoutDialogContent.querySelector('#activity-action-message');
+  if (!apiCredentials) {
+    message.textContent = 'Connect your Intervals.icu account before deleting this activity.';
+    return;
+  }
+  button.disabled = true;
+  button.textContent = 'Deleting…';
+  try {
+    const response = await fetch(`${API_BASE}/activity/${encodeURIComponent(activity.id)}`, {
+      method: 'DELETE',
+      headers: { Authorization: apiBasicAuth(apiCredentials.apiKey), Accept: 'application/json' },
+      cache: 'no-store'
+    });
+    if (!response.ok) throw new Error(`Intervals.icu could not delete this activity (${response.status}).`);
+    events = events.filter(item => String(item.id) !== String(activity.id));
+    renderCalendar();
+    deletingActivity = null;
+    workoutDialog.close();
+  } catch (error) {
+    message.textContent = error instanceof TypeError ? 'Could not reach Intervals.icu. Check your connection and try again.' : error.message;
+    button.disabled = false;
+    button.textContent = 'Delete activity';
+  }
 }
 
 async function loadActivityAnalysis(activity) {
@@ -741,9 +1051,17 @@ function formatInputTime(totalSeconds) {
 }
 
 function parseInputTime(value) {
-  const match = String(value).trim().match(/^(\d{2}):([0-5]\d):([0-5]\d)$/);
-  if (!match) return null;
-  const total = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+  const text = String(value).trim();
+  const clock = text.match(/^(\d{1,2}):([0-5]\d):([0-5]\d)$/);
+  let total;
+  if (clock) {
+    total = Number(clock[1]) * 3600 + Number(clock[2]) * 60 + Number(clock[3]);
+  } else {
+    const fast = text.match(/^(\d+(?:\.\d+)?)\s*([smh])$/i);
+    if (!fast) return null;
+    const factor = fast[2].toLowerCase() === 'h' ? 3600 : fast[2].toLowerCase() === 'm' ? 60 : 1;
+    total = Math.round(Number(fast[1]) * factor);
+  }
   return total > 0 && total <= 36000 ? total : null;
 }
 
@@ -858,7 +1176,7 @@ function renderWorkoutBuilderState() {
   </article>`).join('') : '<div class="builder-empty">Choose a block above to start building.</div>';
   if (inputList) inputList.innerHTML = builderBlocks.length ? builderBlocks.map((block, index) => `<fieldset class="builder-input-block"><legend>${String(index + 1).padStart(2, '0')} · ${escapeHTML(block.label)}</legend>
     <div class="builder-input-block-heading"><strong>${escapeHTML(block.label)}</strong>${block.repeatable ? `<div class="builder-repeat-editor"><span>Repeats</span><button type="button" data-adjust-reps="-1" data-block-index="${index}" aria-label="Remove repetition from ${escapeHTML(block.label)}">−</button><input type="number" min="1" max="20" step="1" value="${block.reps}" data-edit-reps="${index}" aria-label="${escapeHTML(block.label)} repeat count"><button type="button" data-adjust-reps="1" data-block-index="${index}" aria-label="Add repetition to ${escapeHTML(block.label)}">+</button><span>×</span></div>` : ''}</div>
-    <div class="builder-step-inputs">${block.steps.map((step, stepIndex) => `<div class="builder-step-input-row"><span class="builder-step-number">Step ${stepIndex + 1}</span><label>Time<input type="text" inputmode="numeric" maxlength="8" pattern="[0-9]{2}:[0-5][0-9]:[0-5][0-9]" title="Enter time as HH:MM:SS" value="${formatInputTime(step.seconds)}" data-edit-duration="${stepIndex}" data-block-index="${index}" aria-label="${escapeHTML(block.label)} step ${stepIndex + 1} time, HH:MM:SS"></label><label>Power<input type="number" min="0" max="200" step="1" value="${step.power}" data-edit-power="${stepIndex}" data-block-index="${index}" aria-label="${escapeHTML(block.label)} step ${stepIndex + 1} power percent FTP"><span>% FTP</span></label></div>`).join('')}</div>
+    <div class="builder-step-inputs">${block.steps.map((step, stepIndex) => `<div class="builder-step-input-row"><span class="builder-step-number">Step ${stepIndex + 1}</span><label>Time<input type="text" inputmode="text" maxlength="16" title="Enter HH:MM:SS or a fast time such as 10s, 1m, or 1.5h" value="${formatInputTime(step.seconds)}" data-edit-duration="${stepIndex}" data-block-index="${index}" aria-label="${escapeHTML(block.label)} step ${stepIndex + 1} time"></label><label>Power<input type="number" min="0" max="200" step="1" value="${step.power}" data-edit-power="${stepIndex}" data-block-index="${index}" aria-label="${escapeHTML(block.label)} step ${stepIndex + 1} power percent FTP"><span>% FTP</span></label></div>`).join('')}</div>
   </fieldset>`).join('') : '<div class="builder-empty">Add a block to edit its intervals here.</div>';
   workoutDialogContent.querySelector('#builder-chart-wrap').innerHTML = workoutTimelineMarkup();
 }
@@ -915,17 +1233,19 @@ function workoutDescriptionFromBlocks(notes) {
   return notes.trim() ? `${notes.trim()}\n\n${workoutText}` : workoutText;
 }
 
-function openWorkoutBuilder(dateValue) {
+function openWorkoutBuilder(dateValue, eventToEdit = null) {
   const date = parseLocalDate(dateValue) || new Date();
   const dateLabel = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }).format(date);
+  editingEvent = eventToEdit;
   builderBlocks = [];
-  workoutDialogContent.innerHTML = `<form class="builder-form" id="workout-builder-form">
+  workoutDialogContent.innerHTML = `<form class="builder-form" id="workout-builder-form" data-edit-mode="${eventToEdit ? 'true' : 'false'}">
     <input type="hidden" name="date" value="${escapeHTML(dateKey(date))}">
-    <header class="builder-heading"><div class="builder-date-lockup"><h2 class="sr-only" id="workout-dialog-title">Create planned workout</h2><span class="builder-date">${escapeHTML(dateLabel)}</span><span class="builder-heading-caption">PLANNED WORKOUT</span></div><button class="dialog-close" type="button" data-close-workout aria-label="Close">×</button></header>
+    <header class="builder-heading"><div class="builder-date-lockup"><h2 class="sr-only" id="workout-dialog-title">${eventToEdit ? 'Edit planned workout' : 'Create planned workout'}</h2><span class="builder-date">${escapeHTML(dateLabel)}</span><span class="builder-heading-caption">${eventToEdit ? 'EDIT PLANNED WORKOUT' : 'PLANNED WORKOUT'}</span></div><button class="dialog-close" type="button" data-close-workout aria-label="Close">×</button></header>
     <div class="builder-toolbar">
       <label class="builder-name-field"><span class="sr-only">Workout name</span><input name="name" maxlength="80" placeholder="Untitled workout" required></label>
-      <label class="builder-sport-field"><span>Sport</span><select name="type"><option>Ride</option><option>Run</option><option>Swim</option><option>Strength</option><option>Other</option></select></label>
+      <label class="builder-sport-field"><span>Sport</span><select name="type"><option>Ride</option><option value="Run">Running</option><option>Swim</option><option value="WeightTraining">Strength</option><option>Other</option></select></label>
       <label class="builder-distance-field"><span>Distance</span><span class="builder-distance-input"><input name="distance" type="number" min="0" step="0.1" placeholder="—" aria-label="Distance in kilometres"><small>km</small></span></label>
+      <label class="builder-time-field" hidden><span>Time</span><input name="simple-duration" type="text" inputmode="text" maxlength="16" title="Enter HH:MM:SS or a fast time such as 10s, 1m, or 1.5h" placeholder="e.g. 1.5h" aria-label="Workout time"></label>
       <section class="builder-summary" aria-label="Workout summary"><div><span>Total time</span><strong id="builder-total">0:00:00</strong></div><div><span>TSS</span><strong id="builder-tss">—</strong></div><div><span>IF</span><strong id="builder-if">—</strong></div></section>
     </div>
     <section class="builder-section chart-section" aria-labelledby="chart-title"><div class="builder-section-heading"><h3 id="chart-title">Workout profile</h3><span>Drag the ⠿ handles to reorder · drag bars to adjust power or duration</span></div><div id="builder-chart-wrap" class="builder-chart-wrap" data-dropzone="true"></div></section>
@@ -933,14 +1253,38 @@ function openWorkoutBuilder(dateValue) {
       <div class="builder-palette">${BLOCK_PRESETS.map(block => `<button type="button" class="builder-preset" draggable="true" data-add-block="${block.key}" title="Drag or click to add ${escapeHTML(block.label)}"><span class="preset-glyph" aria-hidden="true">${block.steps.slice(0, 3).map(step => `<i style="--zone-color:${powerZone(step.power).color};--bar-height:${Math.max(5, Math.round((step.power / 100) * 18))}px"></i>`).join('')}</span><strong>${escapeHTML(block.label)}</strong></button>`).join('')}</div>
     </section>
     <section class="builder-section workout-sequence" aria-labelledby="sequence-title"><div class="builder-section-heading"><h3 id="sequence-title">Workout blocks</h3><span>Drag to reorder</span></div><div id="builder-block-list" data-dropzone="true"></div></section>
-    <section class="builder-section builder-input-section" aria-labelledby="input-title"><div class="builder-section-heading"><h3 id="input-title">Block editor</h3><span>Time HH:MM:SS · duration snaps to 5 sec · power snaps to 1%</span></div><div id="builder-input-list"></div></section>
-    <label class="builder-field builder-notes-field">Notes<textarea name="description" rows="2" maxlength="500" placeholder="Optional instructions or coaching notes"></textarea></label>
-    <p class="builder-note" id="builder-message">This creates a planned workout directly in your Intervals.icu calendar. Connect first if needed.</p>
-    <div class="builder-actions"><button type="button" class="builder-cancel" data-close-workout>Cancel</button><button class="builder-save" type="submit">Create workout</button></div>
+    <section class="builder-section builder-input-section" aria-labelledby="input-title"><div class="builder-section-heading"><h3 id="input-title">Block editor</h3><span>Time accepts HH:MM:SS or 10s / 1m / 1.5h · duration snaps to 5 sec · power snaps to 1%</span></div><div id="builder-input-list"></div></section>
+    <label class="builder-field builder-notes-field">${eventToEdit ? 'Description' : 'Notes'}<textarea name="description" rows="2" maxlength="5000" placeholder="Optional instructions or coaching notes"></textarea></label>
+    <p class="builder-note" id="builder-message">${eventToEdit ? 'Edit the planned workout in your Intervals.icu calendar.' : 'This creates a planned workout directly in your Intervals.icu calendar. Connect first if needed.'}</p>
+    <div class="builder-actions"><button type="button" class="builder-cancel" data-close-workout>Cancel</button><button class="builder-save" type="submit">${eventToEdit ? 'Save changes' : 'Create workout'}</button></div>
   </form>`;
-  workoutDialog.showModal();
+  if (!workoutDialog.open) workoutDialog.showModal();
+  if (eventToEdit) {
+    const form = workoutDialogContent.querySelector('#workout-builder-form');
+    form.elements.name.value = eventToEdit.name || '';
+    const typeSelect = form.elements.type;
+    if (![...typeSelect.options].some(option => option.value === eventToEdit.type)) {
+      typeSelect.add(new Option(eventToEdit.type || 'Other', eventToEdit.type || 'Other'));
+    }
+    typeSelect.value = eventToEdit.type || 'Other';
+    form.elements.distance.value = Number(eventDistance(eventToEdit)) > 0 ? (Number(eventDistance(eventToEdit)) / 1000).toString() : '';
+    form.elements['simple-duration'].value = Number(eventDuration(eventToEdit)) > 0 ? formatInputTime(Number(eventDuration(eventToEdit))) : '';
+    form.elements.description.value = eventToEdit.description || '';
+  }
+  updateBuilderSportFields();
   workoutDialogContent.querySelector('[name="name"]').focus();
   renderWorkoutBuilderState();
+}
+
+function updateBuilderSportFields() {
+  const form = workoutDialogContent.querySelector('#workout-builder-form');
+  if (!form) return;
+  const type = form.elements.type.value;
+  const basicMode = Boolean(editingEvent) || type === 'Run' || isStrengthType(type);
+  form.dataset.basicMode = String(basicMode);
+  form.dataset.sport = type;
+  form.querySelector('.builder-distance-field').hidden = isStrengthType(type);
+  form.querySelector('.builder-time-field').hidden = !basicMode;
 }
 
 document.querySelector('#previous-month').addEventListener('click', () => {
@@ -966,6 +1310,7 @@ document.querySelector('#disconnect-button').addEventListener('click', () => {
   requestSequence += 1;
   saveCredentials(null);
   events = sampleEvents();
+  wellnessByDate = new Map();
   renderCalendar();
   setConnectionState(false, 'Sample calendar');
   connectDialog.close();
@@ -992,10 +1337,159 @@ connectForm.addEventListener('submit', event => {
     }
   });
 });
+function dayItems(dayKey) {
+  const belongsToDay = item => dateKey(parseLocalDate(item.start_date_local) || new Date(0)) === dayKey;
+  return [...events.filter(item => (item._source === 'planned' || item._source === 'activity') && !item._sample && belongsToDay(item)), ...localWorkouts.filter(belongsToDay)];
+}
+
+function closeDayMenus() {
+  weeksRoot.querySelectorAll('.day-menu-popover:not([hidden])').forEach(menu => {
+    menu.hidden = true;
+    menu.parentElement.querySelector('[data-day-menu]')?.setAttribute('aria-expanded', 'false');
+  });
+}
+
+document.addEventListener('click', event => {
+  if (!event.target.closest('.day-cell')) closeDayMenus();
+});
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  const openMenu = weeksRoot.querySelector('.day-menu-popover:not([hidden])');
+  if (!openMenu) return;
+  const trigger = openMenu.parentElement.querySelector('[data-day-menu]');
+  closeDayMenus();
+  trigger?.focus();
+});
+
+function copyDayWorkouts(dayKey, cut = false) {
+  const selected = dayItems(dayKey).filter(item => item._source === 'planned' || item._local);
+  calendarClipboard = selected.map(item => ({ source: item._local ? 'local' : 'planned', event: { ...item } }));
+  if (cut) {
+    cutDayWorkouts(selected);
+    return;
+  }
+  renderCalendar();
+  setConnectionState(Boolean(apiCredentials), `${selected.length} workout${selected.length === 1 ? '' : 's'} copied`);
+}
+
+async function cutDayWorkouts(selected) {
+  const athlete = encodeURIComponent(apiCredentials?.athleteId || '0');
+  const results = await Promise.allSettled(selected.map(item => item._local ? Promise.resolve(item) : fetch(
+    `${API_BASE}/athlete/${athlete}/events/${encodeURIComponent(item.id)}`,
+    { method: 'DELETE', headers: { Authorization: apiBasicAuth(apiCredentials.apiKey), Accept: 'application/json' }, cache: 'no-store' }
+  ).then(response => { if (!response.ok) throw new Error(`${response.status}`); return item; })));
+  const removed = new Set(results.filter(result => result.status === 'fulfilled').map(result => result.value));
+  events = events.filter(item => !removed.has(item));
+  localWorkouts = localWorkouts.filter(item => !removed.has(item));
+  try { localStorage.setItem(LOCAL_WORKOUTS_KEY, JSON.stringify(localWorkouts)); } catch { /* Storage is optional for this view. */ }
+  renderCalendar();
+  const failed = results.filter(result => result.status === 'rejected').length;
+  setConnectionState(Boolean(apiCredentials), failed ? `Cut ${removed.size}; ${failed} could not be removed` : `${removed.size} workout${removed.size === 1 ? '' : 's'} cut`);
+}
+
+async function pasteDayWorkouts(dayKey) {
+  if (!calendarClipboard?.length) return;
+  const athlete = encodeURIComponent(apiCredentials?.athleteId || '0');
+  const pasted = [];
+  try {
+    for (const entry of calendarClipboard) {
+      if (entry.source === 'local') {
+        pasted.push({ ...entry.event, id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, start_date_local: `${dayKey}T00:00:00`, _local: true, _source: 'planned' });
+        continue;
+      }
+      if (!apiCredentials) throw new Error('Connect Intervals.icu to paste synced workouts.');
+      const source = entry.event;
+      const body = {
+        category: 'WORKOUT', start_date_local: `${dayKey}T00:00:00`, type: source.type,
+        name: source.name || source.type || 'Workout',
+        ...(source.description ? { description: source.description } : {}),
+        ...(Number(source.moving_time) > 0 ? { moving_time: Number(source.moving_time) } : {}),
+        ...(Number(eventDistance(source)) > 0 ? { distance: Number(eventDistance(source)) } : {})
+      };
+      const response = await fetch(`${API_BASE}/athlete/${athlete}/events`, {
+        method: 'POST', headers: { Authorization: apiBasicAuth(apiCredentials.apiKey), Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify(body), cache: 'no-store'
+      });
+      const responseText = await response.text();
+      if (!response.ok) throw new Error(`Intervals.icu could not paste “${body.name}” (${response.status})${responseText ? `: ${responseText.slice(0, 240)}` : ''}.`);
+      let created = body;
+      try { const payload = JSON.parse(responseText); if (payload && !Array.isArray(payload)) created = { ...body, ...payload }; } catch { /* An empty success body is valid. */ }
+      pasted.push({ ...created, _source: 'planned' });
+    }
+    events.push(...pasted.filter(item => !item._local));
+    localWorkouts.push(...pasted.filter(item => item._local));
+    try { localStorage.setItem(LOCAL_WORKOUTS_KEY, JSON.stringify(localWorkouts)); } catch { /* Keep the current session visible. */ }
+    renderCalendar();
+    setConnectionState(Boolean(apiCredentials), `${pasted.length} workout${pasted.length === 1 ? '' : 's'} pasted`);
+  } catch (error) {
+    events.push(...pasted.filter(item => !item._local));
+    localWorkouts.push(...pasted.filter(item => item._local));
+    renderCalendar();
+    syncText.textContent = error.message;
+  }
+}
+
+async function deleteDayWorkouts(dayKey) {
+  const selected = dayItems(dayKey);
+  if (!selected.length) return;
+  const label = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).format(parseLocalDate(dayKey));
+  if (!window.confirm(`Delete all ${selected.length} workout${selected.length === 1 ? '' : 's'} on ${label}? Completed activities will also be deleted. This cannot be undone.`)) return;
+  const athlete = encodeURIComponent(apiCredentials?.athleteId || '0');
+  const results = await Promise.allSettled(selected.map(item => {
+    if (item._local) return Promise.resolve(item);
+    const url = item._source === 'activity' ? `${API_BASE}/activity/${encodeURIComponent(item.id)}` : `${API_BASE}/athlete/${athlete}/events/${encodeURIComponent(item.id)}`;
+    return fetch(url, { method: 'DELETE', headers: { Authorization: apiBasicAuth(apiCredentials.apiKey), Accept: 'application/json' }, cache: 'no-store' }).then(response => {
+      if (!response.ok) throw new Error(`${response.status}`);
+      return item;
+    });
+  }));
+  const removed = new Set(results.filter(result => result.status === 'fulfilled').map(result => result.value));
+  events = events.filter(item => !removed.has(item));
+  localWorkouts = localWorkouts.filter(item => !removed.has(item));
+  try { localStorage.setItem(LOCAL_WORKOUTS_KEY, JSON.stringify(localWorkouts)); } catch { /* Storage is optional for this view. */ }
+  renderCalendar();
+  const failed = results.filter(result => result.status === 'rejected').length;
+  setConnectionState(Boolean(apiCredentials), failed ? `Deleted ${removed.size}; ${failed} could not be deleted` : `${removed.size} day entr${removed.size === 1 ? 'y' : 'ies'} deleted`);
+}
+
 weeksRoot.addEventListener('click', event => {
+  if (suppressCalendarClick) {
+    suppressCalendarClick = false;
+    return;
+  }
+  const menuButton = event.target.closest('[data-day-menu]');
+  if (menuButton) {
+    const menu = menuButton.parentElement.querySelector('.day-menu-popover');
+    const opening = menu.hidden;
+    closeDayMenus();
+    menu.hidden = !opening;
+    menuButton.setAttribute('aria-expanded', String(opening));
+    if (opening) menu.querySelector('[role="menuitem"]:not(:disabled)')?.focus();
+    return;
+  }
+  const actionButton = event.target.closest('[data-day-action]');
+  if (actionButton) {
+    const { dayAction: action, dayKey } = actionButton.dataset;
+    closeDayMenus();
+    if (action === 'add') openWorkoutBuilder(dayKey);
+    else if (action === 'copy') copyDayWorkouts(dayKey);
+    else if (action === 'cut') copyDayWorkouts(dayKey, true);
+    else if (action === 'paste') pasteDayWorkouts(dayKey);
+    else if (action === 'delete') deleteDayWorkouts(dayKey);
+    return;
+  }
+  if (!event.target.closest('.day-menu-popover')) closeDayMenus();
   const addButton = event.target.closest('[data-add-workout]');
   if (addButton) {
     openWorkoutBuilder(addButton.dataset.addWorkout);
+    return;
+  }
+  const deleteButton = event.target.closest('[data-calendar-delete]');
+  if (deleteButton) {
+    const allEvents = JSON.parse(weeksRoot.dataset.events || '[]');
+    const selected = allEvents[Number(deleteButton.dataset.calendarDelete)];
+    if (!selected) return;
+    if (selected._source === 'activity') openActivityDeleteConfirm(selected);
+    else deletePlannedWorkout(selected, deleteButton);
     return;
   }
   const card = event.target.closest('[data-event-index]');
@@ -1005,10 +1499,14 @@ weeksRoot.addEventListener('click', event => {
   if (selected) openWorkout(selected);
 });
 workoutDialogContent.addEventListener('input', event => {
-  if (event.target.matches('[data-edit-duration]')) event.target.setCustomValidity('');
+  if (event.target.matches('[data-edit-duration], [name="simple-duration"]')) event.target.setCustomValidity('');
 });
 workoutDialogContent.addEventListener('change', event => {
   const input = event.target;
+  if (input.matches('[name="type"]')) {
+    updateBuilderSportFields();
+    return;
+  }
   const durationInput = input.closest('[data-edit-duration]');
   const powerInput = input.closest('[data-edit-power]');
   const repeatsInput = input.closest('[data-edit-reps]');
@@ -1024,7 +1522,7 @@ workoutDialogContent.addEventListener('change', event => {
     if (durationInput) {
       const parsedTime = parseInputTime(input.value);
       if (parsedTime === null) {
-        input.setCustomValidity('Enter a valid time in HH:MM:SS format, such as 00:06:00.');
+        input.setCustomValidity('Enter HH:MM:SS or a fast time such as 10s, 1m, or 1.5h.');
         input.reportValidity();
         return;
       }
@@ -1173,6 +1671,40 @@ workoutDialogContent.addEventListener('keydown', event => {
   workoutDialogContent.querySelector(`[data-chart-adjust="${mode}"][data-block-id="${blockId}"][data-step-index="${stepIndex}"]`)?.focus();
 });
 workoutDialogContent.addEventListener('click', event => {
+  const editActivityButton = event.target.closest('[data-edit-activity]');
+  if (editActivityButton) {
+    const selected = events.find(item => item._source === 'activity' && String(item.id) === editActivityButton.dataset.editActivity);
+    if (selected) openActivityNameEditor(selected);
+    return;
+  }
+  const deleteActivityButton = event.target.closest('[data-delete-activity]');
+  if (deleteActivityButton) {
+    const selected = events.find(item => item._source === 'activity' && String(item.id) === deleteActivityButton.dataset.deleteActivity);
+    if (selected) openActivityDeleteConfirm(selected);
+    return;
+  }
+  if (event.target.closest('[data-cancel-activity-delete]')) {
+    deletingActivity = null;
+    workoutDialog.close();
+    return;
+  }
+  const confirmActivityDelete = event.target.closest('[data-confirm-delete-activity]');
+  if (confirmActivityDelete && deletingActivity) {
+    deleteCompletedActivity(deletingActivity, confirmActivityDelete);
+    return;
+  }
+  const editEventButton = event.target.closest('[data-edit-event]');
+  if (editEventButton) {
+    const selected = events.find(item => String(item.id) === editEventButton.dataset.editEvent);
+    if (selected) openWorkoutBuilder(selected.start_date_local, selected);
+    return;
+  }
+  const deleteEventButton = event.target.closest('[data-delete-event]');
+  if (deleteEventButton) {
+    const selected = events.find(item => String(item.id) === deleteEventButton.dataset.deleteEvent);
+    if (selected) deletePlannedWorkout(selected, deleteEventButton);
+    return;
+  }
   const addButton = event.target.closest('[data-add-block]');
   if (addButton) {
     const block = cloneBlockPreset(addButton.dataset.addBlock);
@@ -1282,11 +1814,26 @@ workoutDialogContent.addEventListener('dragend', () => {
 });
 
 workoutDialogContent.addEventListener('submit', async event => {
+  if (event.target.id === 'activity-name-form') {
+    event.preventDefault();
+    if (editingActivity) {
+      const formData = new FormData(event.target);
+      await saveActivityName(editingActivity, String(formData.get('name') || ''), event.target.querySelector('[type="submit"]'));
+    }
+    return;
+  }
   if (event.target.id !== 'workout-builder-form') return;
   event.preventDefault();
   const formData = new FormData(event.target);
-  const durationSeconds = builderTotalDuration();
+  const selectedWorkoutType = String(formData.get('type'));
+  const isStrength = isStrengthType(selectedWorkoutType);
+  const workoutType = isStrength ? 'WeightTraining' : selectedWorkoutType;
+  const basicMode = Boolean(editingEvent) || workoutType === 'Run' || isStrength;
+  const simpleDurationText = String(formData.get('simple-duration') || '').trim();
+  const simpleDuration = basicMode && simpleDurationText ? parseInputTime(simpleDurationText) : null;
+  const durationSeconds = basicMode ? (simpleDuration || 0) : builderTotalDuration();
   const distanceKm = Number(formData.get('distance'));
+  const hasDistance = Number.isFinite(distanceKm) && distanceKm > 0 && (editingEvent ? !isStrength : workoutType === 'Run');
   const date = String(formData.get('date'));
   const message = workoutDialogContent.querySelector('#builder-message');
   const saveButton = workoutDialogContent.querySelector('.builder-save');
@@ -1295,25 +1842,52 @@ workoutDialogContent.addEventListener('submit', async event => {
     message.classList.add('error');
     return;
   }
-  if (!builderBlocks.length) {
+  if (basicMode && simpleDurationText && simpleDuration === null) {
+    const durationInput = workoutDialogContent.querySelector('[name="simple-duration"]');
+    durationInput.setCustomValidity('Enter HH:MM:SS or a fast time such as 10s, 1m, or 1.5h.');
+    durationInput.reportValidity();
+    return;
+  }
+  if (workoutType === 'Run' && !hasDistance && simpleDuration === null) {
+    message.textContent = 'Enter a running distance, a time, or both.';
+    message.classList.add('error');
+    return;
+  }
+  if (isStrength && simpleDuration === null) {
+    const durationInput = workoutDialogContent.querySelector('[name="simple-duration"]');
+    durationInput.setCustomValidity('Enter a time, such as 45m or 1.5h.');
+    durationInput.reportValidity();
+    return;
+  }
+  if (!editingEvent && !basicMode && !builderBlocks.length) {
     message.textContent = 'Add at least one workout block before creating this workout.';
     message.classList.add('error');
     return;
   }
   const athlete = encodeURIComponent(apiCredentials.athleteId || '0');
-  const url = `${API_BASE}/athlete/${athlete}/events`;
+  const url = editingEvent
+    ? `${API_BASE}/athlete/${athlete}/events/${encodeURIComponent(editingEvent.id)}`
+    : `${API_BASE}/athlete/${athlete}/events`;
   const workout = {
     category: 'WORKOUT',
     start_date_local: `${date}T00:00:00`,
-    type: String(formData.get('type')),
+    type: workoutType,
     name: String(formData.get('name')).trim(),
-    description: workoutDescriptionFromBlocks(String(formData.get('description') || '')),
-    moving_time: durationSeconds
+    ...((editingEvent || basicMode)
+      ? (editingEvent ? { description: String(formData.get('description') || '').trim() } : (String(formData.get('description') || '').trim() ? { description: String(formData.get('description') || '').trim() } : {}))
+      : (workoutDescriptionFromBlocks(String(formData.get('description') || '')) ? { description: workoutDescriptionFromBlocks(String(formData.get('description') || '')) } : {}))
   };
-  if (distanceKm > 0) workout.distance = Math.round(distanceKm * 1000);
+  if (editingEvent) {
+    workout.moving_time = simpleDuration ?? 0;
+    workout.distance = hasDistance ? Math.round(distanceKm * 1000) : 0;
+  } else {
+    if (!basicMode || simpleDuration !== null) workout.moving_time = durationSeconds;
+    if (hasDistance) workout.distance = Math.round(distanceKm * 1000);
+  }
   saveButton.disabled = true;
-  saveButton.textContent = 'Creating…';
-  message.textContent = 'Sending workout to Intervals.icu…';
+  const action = editingEvent ? 'Updating' : 'Creating';
+  saveButton.textContent = editingEvent ? 'Saving…' : 'Creating…';
+  message.textContent = `${action} workout in Intervals.icu…`;
   message.classList.remove('error');
   try {
     const controller = new AbortController();
@@ -1321,7 +1895,7 @@ workoutDialogContent.addEventListener('submit', async event => {
     let response;
     try {
       response = await fetch(url, {
-        method: 'POST',
+        method: editingEvent ? 'PUT' : 'POST',
         headers: {
           Authorization: apiBasicAuth(apiCredentials.apiKey),
           Accept: 'application/json',
@@ -1334,23 +1908,46 @@ workoutDialogContent.addEventListener('submit', async event => {
     } finally {
       clearTimeout(timeoutId);
     }
+    const responseBody = await response.text();
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) throw new Error('Intervals.icu rejected this API key or athlete ID. Check your connection settings.');
       if (response.status === 429) throw new Error('Intervals.icu rate limit reached. Wait a little, then try again.');
-      throw new Error(`Intervals.icu could not create the workout (${response.status}). Your calendar was not changed.`);
+      let details = '';
+      if (response.status === 422 && responseBody.trim()) {
+        try {
+          const payload = JSON.parse(responseBody);
+          details = payload.message || payload.error || JSON.stringify(payload);
+        } catch {
+          details = responseBody;
+        }
+        details = String(details).trim().slice(0, 320);
+      }
+      throw new Error(`Intervals.icu could not ${editingEvent ? 'update' : 'create'} the workout (${response.status})${details ? `: ${details}` : ''}. Your calendar was not changed.`);
     }
-    const responseBody = await response.text();
-    let created = workout;
+    let created = editingEvent ? {
+      ...editingEvent,
+      ...workout,
+      workout_doc: {
+        ...(editingEvent.workout_doc || {}),
+        duration: workout.moving_time,
+        distance: workout.distance
+      }
+    } : workout;
     if (responseBody.trim()) {
       try {
         const payload = JSON.parse(responseBody);
-        if (payload && !Array.isArray(payload) && typeof payload === 'object') created = payload;
+        if (payload && !Array.isArray(payload) && typeof payload === 'object') {
+          created = { ...created, ...payload };
+          if (workout.moving_time && !(Number(payload.moving_time) > 0)) created.moving_time = workout.moving_time;
+          if (workout.distance && !(Number(payload.distance) > 0)) created.distance = workout.distance;
+        }
       } catch {
         // A successful create may return no JSON; the submitted event is enough to refresh the calendar.
       }
     }
-    events = events.filter(item => !(item.id && created.id && item.id === created.id));
+    events = events.filter(item => !(item.id && created.id && String(item.id) === String(created.id)));
     events.push({ ...created, _source: 'planned' });
+    editingEvent = null;
     renderCalendar();
     setConnectionState(true, 'Intervals.icu');
     workoutDialog.close();
@@ -1364,12 +1961,22 @@ workoutDialogContent.addEventListener('submit', async event => {
   } finally {
     if (workoutDialog.open && saveButton.isConnected) {
       saveButton.disabled = false;
-      saveButton.textContent = 'Create workout';
+      saveButton.textContent = editingEvent ? 'Save changes' : 'Create workout';
     }
   }
 });
 workoutDialog.addEventListener('click', event => {
-  if (event.target === workoutDialog || event.target.closest('[data-close-workout]')) workoutDialog.close();
+  if (event.target === workoutDialog || event.target.closest('[data-close-workout]')) {
+    editingActivity = null;
+    deletingActivity = null;
+    editingEvent = null;
+    workoutDialog.close();
+  }
+});
+workoutDialog.addEventListener('close', () => {
+  editingActivity = null;
+  deletingActivity = null;
+  editingEvent = null;
 });
 
 events = apiCredentials ? [] : sampleEvents();

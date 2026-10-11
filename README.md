@@ -12,7 +12,7 @@ python3 -m http.server 8000
 
 Then open <http://localhost:8000>.
 
-The calendar starts with labeled sample workouts. Select **Connect Intervals.icu**, enter your personal API key from **Settings → Developer Settings**, and use athlete ID `0` for your own account. The app requests only `WORKOUT` calendar events for the displayed month. Your credentials are held in this browser tab's session storage and requests go directly from your browser to `https://intervals.icu/api/v1`.
+The calendar starts with labeled sample workouts. Select **Connect Intervals.icu**, enter your personal API key from **Settings → Developer Settings**, and use athlete ID `0` for your own account. The app requests `WORKOUT` calendar events, activities, and daily wellness records for the displayed month. Available sleep duration, HRV, and resting heart rate are shown on their calendar days. Those values must first be synced into Intervals.icu (for example, through its Garmin Connect integration). Your credentials are held in this browser tab's session storage and requests go directly from your browser to `https://intervals.icu/api/v1`.
 
 This browser key flow is intended for a personal app. A public, multi-user version should use OAuth with a server-side authorization-code exchange so no OAuth client secret is shipped to the browser.
 
