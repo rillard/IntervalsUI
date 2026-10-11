@@ -717,6 +717,21 @@ body { background: var(--calendar-canvas); }
   .day-label-month { margin-left: 1px; font-size: 7px; }
   .day-menu-button { width: 18px; height: 20px; margin-right: -2px; }
   .day-menu-icon { width: 10px; gap: 2px; }
+  .day-cell .add-workout {
+    position: absolute;
+    z-index: 4;
+    top: 1px;
+    right: 15px;
+    width: 15px;
+    min-height: 20px;
+    display: grid !important;
+    padding: 0;
+    border: 0;
+    color: #62816e;
+    background: transparent;
+    font-size: 15px;
+    opacity: 1;
+  }
   .workout-list { max-height: calc(100% - 23px); gap: 3px; padding: 3px 2px; overflow: hidden; }
   .workout-card { max-height: 47px; padding: 2px 3px 3px; border-top-width: 4px; border-radius: 4px; }
   .workout-type { height: 13px; margin: 0 0 1px; font-size: 0; }
@@ -733,6 +748,7 @@ body { background: var(--calendar-canvas); }
   .calendar-page { height: calc(100vh - 56px); height: calc(100dvh - 56px); }
   .weekdays { height: 20px; flex-basis: 20px; }
   .day-head { height: 18px; }
+  .add-workout { min-height: 17px; height: 17px; }
   .workout-list { max-height: calc(100% - 18px); }
   .workout-type { height: 11px; }
   .sport-icon, .sport-icon img, .sport-icon img[src*="dumbbell"] { width: 11px; height: 11px; }
