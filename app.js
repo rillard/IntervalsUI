@@ -340,6 +340,13 @@ function getVisibleWeeks() {
   return weeks;
 }
 
+function getISOWeekNumber(date) {
+  const thursday = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  thursday.setUTCDate(thursday.getUTCDate() + 4 - (thursday.getUTCDay() || 7));
+  const yearStart = Date.UTC(thursday.getUTCFullYear(), 0, 1);
+  return Math.ceil(((thursday.getTime() - yearStart) / 86400000 + 1) / 7);
+}
+
 function formatMonth(date) {
   return new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' }).format(date);
 }
@@ -486,7 +493,33 @@ function wellnessMarkup(record, detailed = false) {
   return `<div class="wellness-summary" aria-label="Daily health: ${escapeHTML(metrics.map(([label, value]) => `${label} ${value}`).join(', '))}">${metrics.map(([label, value]) => `<span><b>${label}</b> ${escapeHTML(value)}</span>`).join('')}</div>`;
 }
 
-function summaryMarkup(weekEvents) {
+function summarySparkline(values, label, color) {
+  const numericValues = values.map(value => value == null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value));
+  const present = numericValues.filter(value => value !== null);
+  if (!present.length) return '<span class="summary-trend-empty">No data</span>';
+  const min = Math.min(...present);
+  const max = Math.max(...present);
+  const range = max - min || 1;
+  const points = numericValues.map((value, index) => value === null ? null : {
+    x: 2 + index * (96 / Math.max(1, numericValues.length - 1)),
+    y: 22 - ((value - min) / range) * 16
+  });
+  let path = '';
+  let segmentOpen = false;
+  for (const point of points) {
+    if (!point) {
+      segmentOpen = false;
+      continue;
+    }
+    path += `${segmentOpen ? ' L' : ' M'} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`;
+    segmentOpen = true;
+  }
+  const dots = points.filter(Boolean).map(point => `<circle cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="1.8"/>`).join('');
+  const latest = present[present.length - 1];
+  return `<svg class="summary-sparkline" style="--trend-color:${color}" viewBox="0 0 100 26" role="img" aria-label="${label} trend, latest ${Math.round(latest)}, range ${Math.round(min)} to ${Math.round(max)}"><path class="summary-sparkline-track" d="M 2 24 H 98"/><path class="summary-sparkline-line" d="${path}"/><g class="summary-sparkline-dots">${dots}</g></svg>`;
+}
+
+function summaryMarkup(week, weekEvents) {
   const totalSeconds = weekEvents.reduce((sum, event) => sum + Number(eventDuration(event) || 0), 0);
   const totalLoad = weekEvents.reduce((sum, event) => sum + Number(event.icu_training_load || 0), 0);
   const ctlEvent = [...weekEvents].reverse().find(event => Number.isFinite(Number(event.icu_ctl)) && event.icu_ctl !== null);
@@ -496,11 +529,46 @@ function summaryMarkup(weekEvents) {
   const form = ctl !== null && atl !== null ? ctl - atl : null;
   const workouts = weekEvents.length;
   const display = value => value === null ? '—' : Math.round(value);
+  const eventsByDay = new Map();
+  for (const event of weekEvents) {
+    const date = parseLocalDate(event.start_date_local);
+    if (!date) continue;
+    const key = dateKey(date);
+    const daily = eventsByDay.get(key) ?? [];
+    daily.push(event);
+    eventsByDay.set(key, daily);
+  }
+  const ctlTrend = [];
+  const formTrend = [];
+  const hrvTrend = [];
+  for (const date of week) {
+    const key = dateKey(date);
+    const dayEvents = eventsByDay.get(key) ?? [];
+    const ctlRecord = [...dayEvents].reverse().find(event => event.icu_ctl != null && event.icu_ctl !== '' && Number.isFinite(Number(event.icu_ctl)));
+    const formRecord = [...dayEvents].reverse().find(event => event.icu_ctl != null && event.icu_ctl !== '' && event.icu_atl != null && event.icu_atl !== '' && Number.isFinite(Number(event.icu_ctl)) && Number.isFinite(Number(event.icu_atl)));
+    const wellness = wellnessByDate.get(key);
+    const wellnessCtl = wellness?.ctl != null && wellness.ctl !== '' && Number.isFinite(Number(wellness.ctl)) ? Number(wellness.ctl) : null;
+    const wellnessAtl = wellness?.atl != null && wellness.atl !== '' && Number.isFinite(Number(wellness.atl)) ? Number(wellness.atl) : null;
+    ctlTrend.push(wellnessCtl ?? (ctlRecord ? Number(ctlRecord.icu_ctl) : null));
+    formTrend.push(wellnessCtl !== null && wellnessAtl !== null
+      ? wellnessCtl - wellnessAtl
+      : formRecord ? Number(formRecord.icu_ctl) - Number(formRecord.icu_atl) : null);
+    hrvTrend.push(wellness?.hrv != null && wellness.hrv !== '' && Number.isFinite(Number(wellness.hrv)) && Number(wellness.hrv) > 0 ? Number(wellness.hrv) : null);
+  }
+  const trendLatest = values => {
+    const value = [...values].reverse().find(item => item != null);
+    return value == null ? '—' : Math.round(value);
+  };
   return `<aside class="summary-card" aria-label="Weekly training summary">
     <div class="summary-stats">
       <div class="summary-stat"><span>Fitness</span><strong>${display(ctl)}<small>CTL</small></strong></div>
       <div class="summary-stat"><span>Fatigue</span><strong>${display(atl)}<small>ATL</small></strong></div>
       <div class="summary-stat"><span>Form</span><strong>${display(form)}<small>TSB</small></strong></div>
+    </div>
+    <div class="summary-trends" aria-label="Weekly metric trends">
+      <div class="summary-trend"><div class="summary-trend-heading"><span>CTL</span><b>${trendLatest(ctlTrend)}</b></div>${summarySparkline(ctlTrend, 'CTL', '#6da98b')}</div>
+      <div class="summary-trend"><div class="summary-trend-heading"><span>Form</span><b>${trendLatest(formTrend)}</b></div>${summarySparkline(formTrend, 'Form', '#d28a52')}</div>
+      <div class="summary-trend"><div class="summary-trend-heading"><span>HRV</span><b>${trendLatest(hrvTrend)}</b></div>${summarySparkline(hrvTrend, 'HRV', '#6685d7')}</div>
     </div>
     <div class="summary-metric"><span>Total duration</span><strong>${formatCompactDuration(totalSeconds)}</strong></div>
     <div class="summary-meter"><span style="width:${Math.min(100, (totalSeconds / 21600) * 100)}%"></span></div>
@@ -587,8 +655,9 @@ function renderCalendar() {
     const weekStart = week[0];
     const weekEnd = week[6];
     const weekEvents = week.flatMap(date => grouped.get(dateKey(date)) ?? []);
-    return `<section class="week-row${week.some(date => dateKey(date) === todayKey) ? ' is-current' : ''}" aria-label="Week of ${escapeHTML(new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(weekStart))} to ${escapeHTML(new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(weekEnd))}">
-      <div class="week-days" role="row">${daysMarkup}</div>${summaryMarkup(weekEvents)}
+    const weekNumber = getISOWeekNumber(weekStart);
+    return `<section class="week-row${week.some(date => dateKey(date) === todayKey) ? ' is-current' : ''}" aria-label="Week ${weekNumber}, ${escapeHTML(new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(weekStart))} to ${escapeHTML(new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(weekEnd))}">
+      <span class="week-number" aria-label="Week ${weekNumber}">${weekNumber}</span><div class="week-days" role="row">${daysMarkup}</div>${summaryMarkup(week, weekEvents)}
     </section>`;
   }).join('');
   weeksRoot.dataset.events = JSON.stringify(flatEvents);
