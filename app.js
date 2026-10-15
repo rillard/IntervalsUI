@@ -454,8 +454,21 @@ function sampleEvents() {
 
 function getEventsByDate() {
   const grouped = new Map();
+  const activityByPlan = new Map(events
+    .filter(item => item._source === 'activity' && item.paired_event_id != null)
+    .map(item => [String(item.paired_event_id), item]));
+  const hasRecordedActivityData = activity => Boolean(activity?.skyline_chart_bytes)
+    || ['moving_time', 'elapsed_time', 'distance', 'icu_training_load', 'average_watts', 'average_heartrate']
+      .some(field => Number(activity?.[field]) > 0);
   for (const event of events) {
     if (event._source === 'planned' && event.category && event.category !== 'WORKOUT') continue;
+    if (event._source === 'planned' && event.id != null) {
+      const pairedActivity = activityByPlan.get(String(event.id));
+      if (hasRecordedActivityData(pairedActivity)) continue;
+    }
+    if (event._source === 'activity' && event.paired_event_id != null
+        && !hasRecordedActivityData(event)
+        && events.some(item => item._source === 'planned' && String(item.id) === String(event.paired_event_id))) continue;
     const date = parseLocalDate(event.start_date_local);
     if (!date) continue;
     const key = dateKey(date);
@@ -600,7 +613,11 @@ function workoutMarkup(event, index) {
     ? Boolean(event.paired_event_id)
     : event._source === 'planned' && events.some(item => item._source === 'activity' && String(item.paired_event_id) === String(event.id));
   const paired = isPaired ? ' paired' : '';
-  return `<div class="workout-card-wrap"><button class="workout-card ${kind} ${sourceClass} ${restrictedClass}${paired}" type="button" data-event-index="${index}"${canDrag ? ' draggable="true" title="Drag to another day or onto a completed activity to pair"' : ''} aria-label="${escapeHTML(showType)}: ${escapeHTML(name)}">
+  const eventDate = parseLocalDate(event.start_date_local);
+  const isMissed = event._source === 'planned' && !event._sample && !isPaired
+    && eventDate && dateKey(eventDate) < dateKey(new Date());
+  return `<div class="workout-card-wrap"><button class="workout-card ${kind} ${sourceClass} ${restrictedClass}${paired}" type="button" data-event-index="${index}"${canDrag ? ' draggable="true" title="Drag to another day or onto a completed activity to pair"' : ''} aria-label="${escapeHTML(showType)}: ${escapeHTML(name)}${isMissed ? ', not done' : ''}">
+    ${isMissed ? '<span class="missed-indicator">NOT DONE</span>' : ''}
     <span class="workout-type"><i class="sport-icon" aria-hidden="true">${sportIconMarkup(showType)}</i>${escapeHTML(showType)}</span>
     <span class="workout-title">${escapeHTML(name)}</span>
     ${skyline}

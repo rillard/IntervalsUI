@@ -80,6 +80,7 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 3px solid 
 .workout-card.calendar-dragging { opacity: .42; }
 .calendar-drop-target { outline: 2px dashed #438dcc !important; outline-offset: 2px; background-color: #f2f8fd !important; }
 .paired-indicator { display: inline-block; margin-top: 4px; padding: 2px 4px; border-radius: 3px; color: #28643c; background: #e7f4e9; font-size: 8px; font-weight: 700; }
+.missed-indicator { display: block; margin: -5px -6px 6px; padding: 3px 6px; color: #fff; background: #c94343; font-size: 8px; font-weight: 800; letter-spacing: .08em; line-height: 1.2; text-align: center; }
 .calendar-delete { position: absolute; z-index: 2; top: 3px; right: 3px; width: 18px; height: 18px; display: grid; place-items: center; padding: 0; border: 1px solid #e8c8c5; border-radius: 50%; color: #9b413b; background: #fff; font-size: 14px; line-height: 1; cursor: pointer; opacity: 0; transition: opacity .12s ease, background .12s ease; }
 .workout-card-wrap:hover .calendar-delete, .workout-card-wrap:focus-within .calendar-delete { opacity: 1; }
 .calendar-delete:hover, .calendar-delete:focus-visible { background: #fff1ef; }
@@ -627,6 +628,7 @@ body { background: var(--calendar-canvas); }
 .workout-meta span { padding: 2px 4px; border-radius: 4px; background: #f3f6f7; }
 .workout-description { margin-top: 6px; color: #7a8794; font-size: 9px; line-height: 1.35; }
 .paired-indicator { margin-top: 5px; padding: 3px 6px; border-radius: 5px; color: #28664e; background: #edf6f0; font-size: 9px; }
+.missed-indicator { margin: -7px -8px 7px; padding: 4px 8px; border-radius: 6px 6px 0 0; font-size: 9px; }
 .calendar-delete { top: 5px; right: 5px; width: 21px; height: 21px; border-color: #f0d8d6; border-radius: 6px; font-size: 15px; }
 .summary-card { padding: 16px 15px 13px; border-left: 1px solid #edf0f2; background: #fafcfb; }
 .summary-stats { gap: 8px; margin-bottom: 19px; }
