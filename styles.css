@@ -5,10 +5,10 @@
   --ink: #263342;
   --muted: #78838e;
   --line: #dce2e8;
-  --ride: #9f42ca;
-  --run: #de8140;
-  --strength: #438b61;
-  --swim: #31a2a8;
+  --ride: #8730ad;
+  --run: #9b4b16;
+  --strength: #286a43;
+  --swim: #176c70;
   font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -827,4 +827,29 @@ body { background: var(--calendar-canvas); }
   .week-row .summary-trend-empty { height: 20px; }
   .week-row .summary-metric { margin: 2px 0; }
   .week-row .summary-meter, .week-row .summary-empty { display: none; }
+}
+
+:root { --muted: #526171; }
+.weekdays, .weekdays .summary-heading, .week-number-heading, .week-number,
+.day-cell.outside-month .day-head, .day-label-month, .sync-status,
+.workout-description, .summary-stat, .summary-metric, .summary-empty,
+.summary-trend-heading, .summary-trend-empty, .page-footer { color: #526171; }
+.workout-card.other { --sport-color: #426b47; }
+.summary-stat:nth-child(2) strong { color: #98415e; }
+.summary-stat:nth-child(3) strong { color: #98502a; }
+.eyebrow, .connect-dialog label span, .privacy-note, .builder-date,
+.builder-summary-heading span, .builder-summary-metrics span, .builder-summary > p,
+.builder-section-heading > span, .builder-preset small, .builder-empty,
+.builder-block-index, .builder-block-copy span, .builder-input-block legend,
+.builder-step-input-row label > span, .builder-step-number, .builder-chart-empty,
+.builder-note, .workout-detail-date, .workout-detail-metrics span,
+.builder-heading-caption, .builder-distance-input small { color: #526171; }
+.connect-dialog input::placeholder, .builder-field input::placeholder,
+.builder-field textarea::placeholder, .builder-name-field input::placeholder { color: #667585; opacity: 1; }
+.wellness-summary { color: #243d30; background: #eef7f1; border-color: #b9d7c3; font-size: 11px; line-height: 1.4; }
+.wellness-summary b { color: #205b38; }
+.wellness-detail-metrics span { color: #455b4d; font-size: 11px; }
+.summary-trend-heading, .summary-trend-heading b { font-size: 10px; }
+@media (max-width: 600px) {
+  .week-row .summary-trend-heading, .week-row .summary-trend-heading b { font-size: 10px; }
 }
